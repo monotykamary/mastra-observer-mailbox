@@ -1,0 +1,35 @@
+{
+  "name": "mastra-observer-mailbox",
+  "version": "0.1.0",
+  "description": "A hybrid message-oriented store for passive, event-driven communication between AI agents for Mastra",
+  "module": "src/index.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "keywords": [
+    "mastra",
+    "ai",
+    "agents",
+    "mailbox",
+    "observer",
+    "multi-agent",
+    "context-injection"
+  ],
+  "license": "MIT"
+}
