@@ -15,10 +15,79 @@ Key features:
 - **Deduplicated**: Repeated insights don't spam the context
 - **Step-based TTL**: Messages expire after N steps, aligned with context relevance
 
-## Installation
+## Architecture Overview
 
-```bash
-bun add mastra-observer-mailbox
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│                         OBSERVER SYSTEM                                    │
+│                                                                            │
+│   ┌────────────────────────────────────────────────────────────────────┐   │
+│   │                    ObserverMiddleware                              │   │
+│   │  ┌───────────────┐              ┌──────────────────────┐           │   │
+│   │  │transformParams│────────────▶ │ Inject insight into  │           │   │
+│   │  │ (step start)  │   read()     │ prompt               │           │   │
+│   │  └───────────────┘              └──────────────────────┘           │   │
+│   │         │                                                          │   │
+│   │         │                        ┌──────────────────────┐          │   │
+│   │         │                        │   MailboxStore       │          │   │
+│   │         │                        │  ┌────────────────┐  │          │   │
+│   │         │              read()    │  │ messages[]     │  │          │   │
+│   │         │           ◀────────────│  │ snapshots[]    │  │          │   │
+│   │         │                        │  │ config         │  │          │   │
+│   │         │                        │  └────────────────┘  │          │   │
+│   │         │                        └──────────┬───────────┘          │   │
+│   │         │                                   │                      │   │
+│   │         │                          write()  │                      │   │
+│   │         │                                   │                      │   │
+│   │  ┌──────▼──────┐               ┌────────────┴────────────┐         │   │
+│   │  │ wrapGenerate│──────────────▶│   ObserverAgent         │         │   │
+│   │  │ (step end)  │   trigger     │   (background async)    │         │   │
+│   │  └─────────────┘   with        │                         │         │   │
+│   │                    StepSnapshot│   - Analyzes last step  │         │   │
+│   │                                │   - Writes insights     │         │   │
+│   │                                │   - Cheap/fast model    │         │   │
+│   │                                └─────────────────────────┘         │   │
+│   └────────────────────────────────────────────────────────────────────┘   │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Lifecycle Visualization
+
+```
+TIME ──────────────────────────────────────────────────────────────────────▶
+
+STEP 1          STEP 2          STEP 3          STEP 4          STEP 5
+  │               │               │               │               │
+  ▼               ▼               ▼               ▼               ▼
+┌─────┐         ┌─────┐         ┌─────┐         ┌─────┐         ┌─────┐
+│ LLM │         │ LLM │         │ LLM │         │ LLM │         │ LLM │
+│CALL │         │CALL │         │CALL │         │CALL │         │CALL │
+└──┬──┘         └──┬──┘         └──┬──┘         └──┬──┘         └──┬──┘
+   │               │               │               │               │
+   │ trigger       │ trigger       │ trigger       │ trigger       │
+   ▼               ▼               ▼               ▼               ▼
+┌─────┐        ┌─────┐         ┌─────┐         ┌─────┐         ┌─────┐
+│ OBS │ ─ ─ ─ ▶│ OBS │ ─ ─ ─  ▶│ OBS │ ─ ─ ─ ▶ │ OBS │─ ─ ─ ─ ▶│ OBS │
+│ RUN │  async │ RUN │  async  │SKIP │  async  │ RUN │  async  │ RUN │
+└──┬──┘        └──┬──┘         └─────┘         └──┬──┘         └──┬──┘
+   │              │              (still           │               │
+   │              │               working)        │               │
+   ▼              ▼                               ▼               ▼
+
+ MAILBOX STATE OVER TIME:
+
+ Step 1:        Step 2:        Step 3:        Step 4:        Step 5:
+ ┌────────┐    ┌────────┐     ┌────────┐     ┌────────┐     ┌────────┐
+ │ empty  │    │ A ○    │     │ A ○    │     │ A ✓    │     │ A ✓    │
+ │        │    │        │     │ B ○    │     │ B ✓    │     │ B ✓    │
+ │        │    │        │     │        │     │ C ○    │     │ C ✓    │
+ │        │    │        │     │        │     │        │     │ D ○    │
+ └────────┘    └────────┘     └────────┘     └────────┘     └────────┘
+
+ ○ = pending    A arrives     B arrives      C arrives      D arrives
+ ✓ = incorporated             (obs still     A,B read       C read
+                               running       & marked       & marked
+                               from step 1)
 ```
 
 ## Quick Start
@@ -105,6 +174,44 @@ interface MailboxMessage {
 }
 ```
 
+### Message Lifecycle State Machine
+
+```
+                                    ┌─────────────────────────────────────┐
+                                    │                                     │
+                                    ▼                                     │
+┌──────────────┐   send()    ┌──────────────┐   markIncorporated()  ┌─────┴────────┐
+│              │ ──────────▶ │              │ ────────────────────▶ │              │
+│   (none)     │             │   PENDING    │                       │ INCORPORATED │
+│              │             │              │                       │              │
+└──────────────┘             └──────┬───────┘                       └──────┬───────┘
+                                    │                                      │
+                                    │ gc() if                              │ gc() if
+                                    │ currentStep > expiresAtStep          │ too old
+                                    │                                      │
+                                    ▼                                      ▼
+                             ┌──────────────┐                       ┌──────────────┐
+                             │              │                       │              │
+                             │   EXPIRED    │                       │   ARCHIVED   │
+                             │  (deleted)   │                       │  (deleted)   │
+                             │              │                       │              │
+                             └──────────────┘                       └──────────────┘
+```
+
+### State Transitions Over Time
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Step  │ Message A                │ Message B              │ Message C       │
+├───────┼──────────────────────────┼────────────────────────┼─────────────────┤
+│   1   │ ○ PENDING (just sent)    │ -                      │ -               │
+│   2   │ ○ PENDING (not read yet) │ ○ PENDING (just sent)  │ -               │
+│   3   │ ✓ INCORPORATED (step 3)  │ ✓ INCORPORATED (step 3)│ ○ PENDING       │
+│   4   │ ✓ INCORPORATED (step 3)  │ ✓ INCORPORATED (step 3)│ ○ PENDING       │
+│   5   │ x ARCHIVED (gc'd)        │ ✓ INCORPORATED (step 3)│ ✓ INCORPORATED  │
+└───────┴──────────────────────────┴────────────────────────┴─────────────────┘
+```
+
 ### Injection Targets
 
 | Target              | Placement                  | Best For         |
@@ -120,6 +227,119 @@ interface MailboxMessage {
 | `every-step`  | After every LLM call             |
 | `on-tool-call`| Only when tools are called       |
 | `on-failure`  | Only on error-like responses     |
+
+### Prompt Injection Example
+
+**Before Injection (raw prompt from agent):**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ role: system                                                                │
+│ content: "You are a helpful assistant that browses the web..."              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ role: user                                                                  │
+│ content: "Find the cheapest flight to Tokyo"                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ role: assistant                                                             │
+│ content: "I'll search for flights..." + tool_call(search)                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ role: tool                                                                  │
+│ content: [search results...]                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**After Injection (with observer messages):**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ role: system                                                                │
+│ content: "You are a helpful assistant that browses the web..."              │
+│                                                                             │
+│ ┌─────────────────────────────────────────────────────────────────────────┐ │
+│ │ <observer-context>                                                      │ │
+│ │                                                                         │ │
+│ │ [INSIGHT confidence=0.85]                                               │ │
+│ │ The user mentioned "cheapest" - prioritize budget airlines and          │ │
+│ │ consider nearby airports (NRT vs HND) for better prices.                │ │
+│ │                                                                         │ │
+│ │ [WARNING confidence=0.72]                                               │ │
+│ │ Previous search only checked one airline. Expedia and Google Flights    │ │
+│ │ may have aggregated results.                                            │ │
+│ │                                                                         │ │
+│ │ </observer-context>                                                     │ │
+│ └─────────────────────────────────────────────────────────────────────────┘ │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ role: user                                                                  │
+│ content: "Find the cheapest flight to Tokyo"                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ ... rest of conversation ...                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Prompt Caching Optimization
+
+**Problem: Observer context in middle breaks cache**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ┌─────────────────────────────────────────┐                                │
+│  │ SYSTEM PROMPT (static)                  │ ◀── CACHED                     │
+│  └─────────────────────────────────────────┘                                │
+│  ┌─────────────────────────────────────────┐                                │
+│  │ OBSERVER CONTEXT (dynamic)              │ ◀── CHANGES EACH STEP          │
+│  └─────────────────────────────────────────┘     (breaks cache here)        │
+│  ┌─────────────────────────────────────────┐                                │
+│  │ CONVERSATION HISTORY                    │ ◀── CACHE BROKEN               │
+│  └─────────────────────────────────────────┘                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Solution: Put observer context at the END**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ┌─────────────────────────────────────────┐                                │
+│  │ SYSTEM PROMPT (static)                  │ ◀── CACHED ✓                   │
+│  └─────────────────────────────────────────┘                                │
+│  ┌─────────────────────────────────────────┐                                │
+│  │ CONVERSATION HISTORY                    │ ◀── CACHED ✓                   │
+│  │ [user, assistant, tool, ...]            │                                │
+│  └─────────────────────────────────────────┘                                │
+│  ┌─────────────────────────────────────────┐                                │
+│  │ OBSERVER CONTEXT (as user message)      │ ◀── NEW (small, changes)       │
+│  │ "[Observer: Consider checking...]"      │                                │
+│  └─────────────────────────────────────────┘                                │
+│  ┌─────────────────────────────────────────┐                                │
+│  │ LATEST USER MESSAGE / TOOL RESULT       │ ◀── NEW (expected)             │
+│  └─────────────────────────────────────────┘                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Result: System + History = CACHED, only Observer + Latest = NEW
+```
+
+### Handling Observer Latency
+
+When observer is slower than main agent's tick rate:
+
+```
+         Step 1       Step 2       Step 3       Step 4       Step 5
+           │            │            │            │            │
+Main:      ●───────────▶●───────────▶●───────────▶●───────────▶●
+           │            │            │            │            │
+Observer:  ●━━━━━━━━━━━━━━━━━━━━━━━━▶○            │            │
+           ▲            ▲            ▲            │            │
+           │            │            │            │            │
+           trigger      (still       completes!   │            │
+           for step 1   running)     sends msg    │            │
+                                                  │            │
+Observer:                            ●━━━━━━━━━━━━━━━━━━━━━━━━▶○
+                                     ▲                         ▲
+                                     │                         │
+                                     trigger                   completes
+                                     for step 3
+
+RESULT: Messages arrive 1-2 steps late, but are still useful context.
+```
 
 ## API Reference
 
