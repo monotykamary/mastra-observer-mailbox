@@ -509,3 +509,189 @@ describe("createObserverMiddleware()", () => {
     expect(middleware.getConfig().injection.target).toBe("system-prompt");
   });
 });
+
+describe("Error handling and retry", () => {
+  let store: InMemoryMailboxStore;
+
+  beforeEach(() => {
+    store = new InMemoryMailboxStore();
+  });
+
+  test("should call onError when observer fails (no retries)", async () => {
+    const errorCallback = mock((_error: Error, _snapshot: StepSnapshot, _attempts: number) => {});
+    const failingTrigger = mock(async () => {
+      throw new Error("Observer failed");
+    });
+
+    const middleware = new ObserverMiddleware({
+      store,
+      injection: {
+        target: "end-of-history",
+        maxMessagesPerTurn: 3,
+        minConfidence: 0.6,
+      },
+      trigger: {
+        mode: "every-step",
+        async: false,
+        onError: errorCallback,
+      },
+      onTrigger: failingTrigger,
+    });
+
+    const prompt: PromptMessage[] = [{ role: "user", content: "Hello" }];
+    middleware.transformParams("thread-1", 1, prompt);
+    await middleware.afterGenerate("thread-1", { text: "Response" });
+
+    expect(failingTrigger).toHaveBeenCalledTimes(1);
+    expect(errorCallback).toHaveBeenCalledTimes(1);
+    expect(errorCallback.mock.calls[0]![0]).toBeInstanceOf(Error);
+    expect(errorCallback.mock.calls[0]![0].message).toBe("Observer failed");
+    expect(errorCallback.mock.calls[0]![2]).toBe(1); // 1 attempt
+  });
+
+  test("should retry on failure with maxRetries", async () => {
+    const errorCallback = mock((_error: Error, _snapshot: StepSnapshot, _attempts: number) => {});
+    let callCount = 0;
+    const failingTrigger = mock(async () => {
+      callCount++;
+      throw new Error("Observer failed");
+    });
+
+    const middleware = new ObserverMiddleware({
+      store,
+      injection: {
+        target: "end-of-history",
+        maxMessagesPerTurn: 3,
+        minConfidence: 0.6,
+      },
+      trigger: {
+        mode: "every-step",
+        async: false,
+        maxRetries: 2,
+        retryDelayMs: 10, // Short delay for tests
+        onError: errorCallback,
+      },
+      onTrigger: failingTrigger,
+    });
+
+    const prompt: PromptMessage[] = [{ role: "user", content: "Hello" }];
+    middleware.transformParams("thread-1", 1, prompt);
+    await middleware.afterGenerate("thread-1", { text: "Response" });
+
+    // 1 initial + 2 retries = 3 attempts
+    expect(failingTrigger).toHaveBeenCalledTimes(3);
+    expect(errorCallback).toHaveBeenCalledTimes(1);
+    expect(errorCallback.mock.calls[0]![2]).toBe(3); // 3 total attempts
+  });
+
+  test("should succeed on retry if later attempt works", async () => {
+    const errorCallback = mock((_error: Error, _snapshot: StepSnapshot, _attempts: number) => {});
+    let callCount = 0;
+    const sometimesFailingTrigger = mock(async () => {
+      callCount++;
+      if (callCount < 2) {
+        throw new Error("Observer failed");
+      }
+      // Second attempt succeeds
+    });
+
+    const middleware = new ObserverMiddleware({
+      store,
+      injection: {
+        target: "end-of-history",
+        maxMessagesPerTurn: 3,
+        minConfidence: 0.6,
+      },
+      trigger: {
+        mode: "every-step",
+        async: false,
+        maxRetries: 2,
+        retryDelayMs: 10,
+        onError: errorCallback,
+      },
+      onTrigger: sometimesFailingTrigger,
+    });
+
+    const prompt: PromptMessage[] = [{ role: "user", content: "Hello" }];
+    middleware.transformParams("thread-1", 1, prompt);
+    await middleware.afterGenerate("thread-1", { text: "Response" });
+
+    // Should have been called twice (failed once, succeeded on retry)
+    expect(sometimesFailingTrigger).toHaveBeenCalledTimes(2);
+    // Should NOT call error callback since it eventually succeeded
+    expect(errorCallback).not.toHaveBeenCalled();
+  });
+
+  test("should use exponential backoff between retries", async () => {
+    const timestamps: number[] = [];
+    const failingTrigger = mock(async () => {
+      timestamps.push(Date.now());
+      throw new Error("Observer failed");
+    });
+
+    const middleware = new ObserverMiddleware({
+      store,
+      injection: {
+        target: "end-of-history",
+        maxMessagesPerTurn: 3,
+        minConfidence: 0.6,
+      },
+      trigger: {
+        mode: "every-step",
+        async: false,
+        maxRetries: 2,
+        retryDelayMs: 50, // 50ms base delay
+      },
+      onTrigger: failingTrigger,
+    });
+
+    const prompt: PromptMessage[] = [{ role: "user", content: "Hello" }];
+    middleware.transformParams("thread-1", 1, prompt);
+    await middleware.afterGenerate("thread-1", { text: "Response" });
+
+    expect(timestamps.length).toBe(3);
+
+    // First retry should be after ~50ms
+    const firstDelay = timestamps[1]! - timestamps[0]!;
+    expect(firstDelay).toBeGreaterThanOrEqual(40); // Allow some tolerance
+
+    // Second retry should be after ~100ms (exponential: 50 * 2^1)
+    const secondDelay = timestamps[2]! - timestamps[1]!;
+    expect(secondDelay).toBeGreaterThanOrEqual(80);
+  });
+
+  test("should not use retries in async mode but still handle errors", async () => {
+    const errorCallback = mock((_error: Error, _snapshot: StepSnapshot, _attempts: number) => {});
+    const failingTrigger = mock(async () => {
+      throw new Error("Observer failed");
+    });
+
+    const middleware = new ObserverMiddleware({
+      store,
+      injection: {
+        target: "end-of-history",
+        maxMessagesPerTurn: 3,
+        minConfidence: 0.6,
+      },
+      trigger: {
+        mode: "every-step",
+        async: true, // Async mode
+        maxRetries: 2,
+        retryDelayMs: 10,
+        onError: errorCallback,
+      },
+      onTrigger: failingTrigger,
+    });
+
+    const prompt: PromptMessage[] = [{ role: "user", content: "Hello" }];
+    middleware.transformParams("thread-1", 1, prompt);
+    await middleware.afterGenerate("thread-1", { text: "Response" });
+
+    // Wait for async execution
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    // Should still retry in async mode
+    expect(failingTrigger).toHaveBeenCalledTimes(3);
+    expect(errorCallback).toHaveBeenCalledTimes(1);
+  });
+});

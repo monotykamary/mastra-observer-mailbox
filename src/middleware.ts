@@ -22,6 +22,10 @@ import {
   DEFAULT_INJECTION_CONFIG,
   DEFAULT_TRIGGER_CONFIG,
 } from "./types.ts";
+import type { FailureDetector, ResponseSnapshot } from "./failure-detection.ts";
+import { createDefaultFailureDetector } from "./failure-detection.ts";
+import { sanitizeContent } from "./sanitization.ts";
+import type { ObserverRegistry } from "./observer-registry.ts";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Injection Utilities
@@ -29,14 +33,21 @@ import {
 
 /**
  * Format messages for injection into prompts.
+ * Content is sanitized to prevent prompt injection attacks.
  */
-export function formatMessagesForInjection(messages: MailboxMessage[]): string {
+export function formatMessagesForInjection(
+  messages: MailboxMessage[],
+  options?: { sanitize?: boolean }
+): string {
   if (messages.length === 0) return "";
+
+  const shouldSanitize = options?.sanitize ?? true;
 
   const formatted = messages.map((m) => {
     const typeLabel = m.type.toUpperCase();
     const confidenceStr = (m.confidence * 100).toFixed(0);
-    return `[${typeLabel} confidence=${confidenceStr}%]\n${m.content}`;
+    const content = shouldSanitize ? sanitizeContent(m.content) : m.content;
+    return `[${typeLabel} confidence=${confidenceStr}%]\n${content}`;
   });
 
   return `<observer-context>\n\n${formatted.join("\n\n")}\n\n</observer-context>`;
@@ -154,6 +165,8 @@ export class ObserverMiddleware {
   private injection: InjectionConfig;
   private trigger: TriggerConfig;
   private onTrigger?: (snapshot: StepSnapshot) => void | Promise<void>;
+  private registry?: ObserverRegistry;
+  private failureDetector: FailureDetector | null = null;
 
   // Track current step state
   private stepStates = new Map<ThreadId, StepState>();
@@ -163,6 +176,76 @@ export class ObserverMiddleware {
     this.injection = { ...DEFAULT_INJECTION_CONFIG, ...config.injection };
     this.trigger = { ...DEFAULT_TRIGGER_CONFIG, ...config.trigger };
     this.onTrigger = config.onTrigger;
+    this.registry = config.registry;
+
+    // Store custom failure detector if provided (lazy init default)
+    if (config.trigger?.failureDetector) {
+      this.failureDetector = config.trigger.failureDetector;
+    }
+  }
+
+  /**
+   * Get or create the failure detector (lazy initialization)
+   */
+  private getFailureDetector(): FailureDetector {
+    if (!this.failureDetector) {
+      this.failureDetector = createDefaultFailureDetector();
+    }
+    return this.failureDetector;
+  }
+
+  /**
+   * Execute observers (either via registry or single onTrigger) with retry logic.
+   */
+  private async executeObservers(snapshot: StepSnapshot): Promise<void> {
+    const maxRetries = this.trigger.maxRetries ?? 0;
+    const baseDelayMs = this.trigger.retryDelayMs ?? 100;
+    const onError = this.trigger.onError;
+
+    let lastError: Error | null = null;
+    let attempts = 0;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      attempts = attempt + 1;
+      try {
+        // Use registry if available, otherwise use onTrigger
+        if (this.registry) {
+          await this.registry.dispatch(snapshot);
+        } else if (this.onTrigger) {
+          await Promise.resolve(this.onTrigger(snapshot));
+        }
+        return; // Success
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+
+        // If we have more retries, wait with exponential backoff
+        if (attempt < maxRetries) {
+          const delay = baseDelayMs * Math.pow(2, attempt);
+          await this.sleep(delay);
+        }
+      }
+    }
+
+    // All retries exhausted
+    if (lastError) {
+      if (onError) {
+        // Use custom error handler
+        onError(lastError, snapshot, attempts);
+      } else {
+        // Fallback to console.error for backward compatibility
+        console.error(
+          `[ObserverMiddleware] Trigger failed after ${attempts} attempt(s):`,
+          lastError
+        );
+      }
+    }
+  }
+
+  /**
+   * Sleep for a given number of milliseconds.
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**
@@ -242,15 +325,15 @@ export class ObserverMiddleware {
     // Determine if we should trigger observer
     const shouldTrigger = this.shouldTrigger(response);
 
-    if (shouldTrigger && this.onTrigger) {
+    if (shouldTrigger && (this.onTrigger || this.registry)) {
       if (this.trigger.async) {
-        // Fire and forget
-        Promise.resolve(this.onTrigger(snapshot)).catch((err: unknown) => {
-          console.error("[ObserverMiddleware] Async trigger error:", err);
+        // Fire and forget with error handling
+        this.executeObservers(snapshot).catch(() => {
+          // Error already handled in executeObservers
         });
       } else {
-        // Wait for observer
-        await this.onTrigger(snapshot);
+        // Wait for observer with error handling
+        await this.executeObservers(snapshot);
       }
     }
 
@@ -262,11 +345,7 @@ export class ObserverMiddleware {
   /**
    * Determine if observer should be triggered based on mode.
    */
-  private shouldTrigger(response: {
-    text?: string;
-    toolCalls?: Array<{ name: string; args: unknown }>;
-    toolResults?: Array<{ name: string; result: unknown }>;
-  }): boolean {
+  private shouldTrigger(response: ResponseSnapshot): boolean {
     switch (this.trigger.mode) {
       case "every-step":
         return true;
@@ -274,16 +353,12 @@ export class ObserverMiddleware {
       case "on-tool-call":
         return (response.toolCalls?.length ?? 0) > 0;
 
-      case "on-failure":
-        // Check for failure indicators in response
-        // This is a heuristic - could be customized
-        const text = response.text?.toLowerCase() ?? "";
-        const hasError =
-          text.includes("error") ||
-          text.includes("failed") ||
-          text.includes("unable to") ||
-          text.includes("cannot");
-        return hasError;
+      case "on-failure": {
+        // Use configurable failure detector (with negation awareness)
+        const detector = this.getFailureDetector();
+        const result = detector.detect(response);
+        return result.isFailure;
+      }
 
       default:
         return true;
@@ -305,6 +380,13 @@ export class ObserverMiddleware {
       injection: { ...this.injection },
       trigger: { ...this.trigger },
     };
+  }
+
+  /**
+   * Get the observer registry (if using multi-observer mode).
+   */
+  getRegistry(): ObserverRegistry | undefined {
+    return this.registry;
   }
 }
 

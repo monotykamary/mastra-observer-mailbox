@@ -217,6 +217,26 @@ export interface TriggerConfig {
   mode: TriggerMode;
   /** false = wait for observer before next step */
   async: boolean;
+  /**
+   * Custom failure detector for 'on-failure' mode.
+   * If not provided, uses the default keyword-based detector with negation awareness.
+   */
+  failureDetector?: import("./failure-detection.ts").FailureDetector;
+  /**
+   * Maximum number of retry attempts for observer trigger on failure.
+   * Default: 0 (no retries)
+   */
+  maxRetries?: number;
+  /**
+   * Base delay in milliseconds between retry attempts (exponential backoff).
+   * Default: 100ms
+   */
+  retryDelayMs?: number;
+  /**
+   * Callback when observer trigger fails (after all retries exhausted).
+   * Provides structured error reporting instead of just console.error.
+   */
+  onError?: (error: Error, snapshot: StepSnapshot, attempts: number) => void;
 }
 
 export interface ObserverMiddlewareConfig {
@@ -227,8 +247,16 @@ export interface ObserverMiddlewareConfig {
   /**
    * Called when observer should analyze a step.
    * This is where you'd invoke your observer agent.
+   * Mutually exclusive with `registry`.
    */
   onTrigger?: (snapshot: StepSnapshot) => void | Promise<void>;
+
+  /**
+   * Observer registry for multi-observer support.
+   * When provided, dispatches snapshots to all registered observers.
+   * Mutually exclusive with `onTrigger`.
+   */
+  registry?: import("./observer-registry.ts").ObserverRegistry;
 }
 
 export const DEFAULT_INJECTION_CONFIG: InjectionConfig = {

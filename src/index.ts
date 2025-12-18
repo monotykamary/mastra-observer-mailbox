@@ -78,3 +78,101 @@ export {
   formatMessagesForInjection,
   injectIntoPrompt,
 } from "./middleware.ts";
+
+// Failure Detection
+export type {
+  ResponseSnapshot,
+  FailureResult,
+  FailureDetector,
+  KeywordFailureDetectorConfig,
+} from "./failure-detection.ts";
+
+export {
+  KeywordFailureDetector,
+  ToolErrorDetector,
+  PredicateFailureDetector,
+  CompositeFailureDetector,
+  createDefaultFailureDetector,
+  createPredicateDetector,
+} from "./failure-detection.ts";
+
+// Sanitization
+export type {
+  ValidationIssue,
+  ValidationResult,
+  SanitizeOptions,
+  ContentSanitizer,
+} from "./sanitization.ts";
+
+export {
+  defaultSanitizer,
+  sanitizeContent,
+  validateContent,
+  createSanitizer,
+  escapeXml,
+} from "./sanitization.ts";
+
+// Observer Registry
+export type {
+  ObserverResult,
+  ObserverHandler,
+  DispatchResult,
+  ObserverRegistryConfig,
+} from "./observer-registry.ts";
+
+export {
+  ObserverRegistry,
+  createObserverRegistry,
+  createSimpleObserver,
+  createToolCallObserver,
+  createKeywordObserver,
+} from "./observer-registry.ts";
+
+// Retention Policies
+export type {
+  RetentionPolicy,
+  RetentionResult,
+  RetentionManagerConfig,
+} from "./retention.ts";
+
+export {
+  DEFAULT_RETENTION_POLICIES,
+  DEFAULT_RETENTION_CONFIG,
+  RetentionManager,
+  createRetentionManager,
+  applyRetention,
+} from "./retention.ts";
+
+// Event Bus
+export type {
+  BaseEvent,
+  MessageSentEvent,
+  MessageReadEvent,
+  MessageExpiredEvent,
+  MessageDedupedEvent,
+  MessagesInjectedEvent,
+  ObserverTriggeredEvent,
+  ObserverCompletedEvent,
+  ObserverFailedEvent,
+  RetentionAppliedEvent,
+  StepCompletedEvent,
+  MailboxEvent,
+  MailboxEventType,
+  EventHandler,
+  Unsubscribe,
+  EventBusConfig,
+  MailboxMetrics,
+} from "./event-bus.ts";
+
+export {
+  EventBus,
+  createEventBus,
+  MetricsCollector,
+  createMetricsCollector,
+  messageSentEvent,
+  messageReadEvent,
+  observerTriggeredEvent,
+  observerCompletedEvent,
+  observerFailedEvent,
+  stepCompletedEvent,
+} from "./event-bus.ts";
