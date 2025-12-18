@@ -13,13 +13,18 @@
     }
   },
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target node",
+    "build": "bun build src/index.ts --outdir dist --target node && tsc -p tsconfig.build.json",
     "test": "bun test",
     "test:watch": "bun test --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "release": "standard-version",
+    "release:minor": "standard-version --release-as minor",
+    "release:major": "standard-version --release-as major",
+    "publish:npm": "bun run build && npm publish"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "standard-version": "^9.5.0",
     "typescript": "^5"
   },
   "keywords": [
@@ -31,5 +36,9 @@
     "multi-agent",
     "context-injection"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "files": [
+    "dist",
+    "README.md"
+  ]
 }
