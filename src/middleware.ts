@@ -146,18 +146,27 @@ interface StepState {
  * Middleware that provides bidirectional communication between
  * main agents and observer agents.
  *
- * Usage:
+ * @deprecated Use `createObserverContext` from `mastra-observer-mailbox/primitives` instead.
+ * The primitives API provides more flexibility and better integration with Mastra.
+ *
+ * @example Migration:
  * ```typescript
- * const middleware = new ObserverMiddleware({
- *   store,
- *   injection: { target: 'end-of-history', maxMessagesPerTurn: 3, minConfidence: 0.6 },
- *   trigger: { mode: 'every-step', async: true },
- *   onTrigger: async (snapshot) => {
- *     // Run your observer agent here
- *     const insight = await observerAgent.analyze(snapshot);
- *     store.send({ ...insight });
- *   },
- * });
+ * // Old:
+ * const middleware = createObserverMiddleware({ store, ... });
+ * const enriched = middleware.transformParams(threadId, step, prompt);
+ * await middleware.afterGenerate(threadId, response);
+ *
+ * // New:
+ * import { createObserverContext } from 'mastra-observer-mailbox/primitives';
+ * const ctx = createObserverContext({ store, threadId });
+ * ctx.nextStep();
+ * const { formattedContext, messageIds } = ctx.getPendingContext();
+ * const enriched = ctx.injectContext(prompt, formattedContext);
+ * // ... after generation ...
+ * ctx.markIncorporated(messageIds);
+ * const snapshot = ctx.createSnapshot(prompt, response);
+ * await ctx.dispatchToObservers(snapshot, handler);
+ * ctx.gc();
  * ```
  */
 export class ObserverMiddleware {
@@ -396,6 +405,9 @@ export class ObserverMiddleware {
 
 /**
  * Create an observer middleware instance.
+ *
+ * @deprecated Use `createObserverContext` from `mastra-observer-mailbox/primitives` instead.
+ * See `ObserverMiddleware` class documentation for migration guide.
  */
 export function createObserverMiddleware(
   config: ObserverMiddlewareConfig

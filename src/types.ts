@@ -269,3 +269,192 @@ export const DEFAULT_TRIGGER_CONFIG: TriggerConfig = {
   mode: "every-step",
   async: true,
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Primitives Types (for createObserverContext)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Configuration for creating an observer context.
+ */
+export interface ObserverContextConfig {
+  /** The mailbox store to use */
+  store: MailboxStore;
+
+  /** Thread ID this context is bound to */
+  threadId: ThreadId;
+
+  /** Whether to auto-increment step on each getPendingContext call */
+  autoIncrementStep?: boolean;
+
+  /** Initial step number (default: 0) */
+  initialStep?: StepNumber;
+
+  /** Injection configuration */
+  injection?: Partial<InjectionConfig>;
+}
+
+/**
+ * Result from getPendingContext().
+ */
+export interface PendingContextResult {
+  /** The pending messages retrieved from the store */
+  messages: MailboxMessage[];
+
+  /** Formatted context string ready for injection */
+  formattedContext: string;
+
+  /** Message IDs for later marking as incorporated */
+  messageIds: MessageId[];
+}
+
+/**
+ * Options for getPendingContext().
+ */
+export interface GetPendingContextOptions {
+  /** Override min confidence for this query */
+  minConfidence?: number;
+
+  /** Override max messages for this query */
+  maxMessages?: number;
+
+  /** Filter by message types */
+  types?: MessageType[];
+}
+
+/**
+ * Options for createSnapshot().
+ */
+export interface CreateSnapshotOptions {
+  /** Working memory to include in snapshot */
+  workingMemory?: Record<string, unknown>;
+}
+
+/**
+ * Options for dispatchToObservers().
+ */
+export interface DispatchOptions {
+  /** Whether to await the handler (default: false, fire-and-forget) */
+  await?: boolean;
+
+  /** Maximum retry attempts on failure */
+  maxRetries?: number;
+
+  /** Base delay between retries in ms (exponential backoff) */
+  retryDelayMs?: number;
+
+  /** Error callback */
+  onError?: (error: Error, snapshot: StepSnapshot, attempts: number) => void;
+}
+
+/**
+ * Observer context returned by createObserverContext factory.
+ * Provides bound methods for a specific thread.
+ */
+export interface ObserverContext {
+  /** The thread ID this context is bound to */
+  readonly threadId: ThreadId;
+
+  /** Current step number */
+  readonly currentStep: StepNumber;
+
+  /** The underlying store */
+  readonly store: MailboxStore;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Input Processing
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Get pending messages and format them for injection.
+   * If autoIncrementStep is false, call nextStep() before this.
+   */
+  getPendingContext(opts?: GetPendingContextOptions): PendingContextResult;
+
+  /**
+   * Inject formatted context into messages at the specified target.
+   */
+  injectContext(
+    messages: PromptMessage[],
+    formattedContext: string,
+    target?: InjectionTarget
+  ): PromptMessage[];
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Output Processing
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Mark messages as incorporated after successful injection.
+   */
+  markIncorporated(messageIds: MessageId[]): void;
+
+  /**
+   * Create a snapshot of the current step for observer analysis.
+   */
+  createSnapshot(
+    originalPrompt: PromptMessage[],
+    response: StepSnapshot["response"],
+    opts?: CreateSnapshotOptions
+  ): StepSnapshot;
+
+  /**
+   * Dispatch snapshot to observer handler(s).
+   * By default, fire-and-forget. Use opts.await = true to wait.
+   */
+  dispatchToObservers(
+    snapshot: StepSnapshot,
+    handler: (snapshot: StepSnapshot) => void | Promise<void>,
+    opts?: DispatchOptions
+  ): Promise<void>;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Step Management
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Increment and return the new step number.
+   */
+  nextStep(): StepNumber;
+
+  /**
+   * Set the step number explicitly.
+   */
+  setStep(step: StepNumber): void;
+
+  /**
+   * Run garbage collection for this thread.
+   */
+  gc(): void;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Filter Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Input provided to injection filter functions.
+ */
+export interface InjectionFilterInput {
+  messages: PromptMessage[];
+  step: StepNumber;
+  threadId: ThreadId;
+}
+
+/**
+ * Input provided to trigger filter functions.
+ */
+export interface TriggerFilterInput {
+  snapshot: StepSnapshot;
+  response: StepSnapshot["response"];
+}
+
+/**
+ * Filter function that determines whether to inject observer context.
+ */
+export type InjectionFilterFn = (input: InjectionFilterInput) => boolean;
+
+/**
+ * Filter function that determines whether to trigger observers.
+ */
+export type TriggerFilterFn = (input: TriggerFilterInput) => boolean;

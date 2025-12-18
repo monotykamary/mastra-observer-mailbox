@@ -59,6 +59,17 @@ export type {
   InjectionConfig,
   TriggerConfig,
   ObserverMiddlewareConfig,
+  // Primitives types
+  ObserverContext,
+  ObserverContextConfig,
+  PendingContextResult,
+  GetPendingContextOptions,
+  CreateSnapshotOptions,
+  DispatchOptions,
+  InjectionFilterInput,
+  TriggerFilterInput,
+  InjectionFilterFn,
+  TriggerFilterFn,
 } from "./types.ts";
 
 // Constants
@@ -176,3 +187,11 @@ export {
   observerFailedEvent,
   stepCompletedEvent,
 } from "./event-bus.ts";
+
+// Primitives (composable API)
+export {
+  createObserverContext,
+  InjectionFilters,
+  TriggerFilters,
+  injectObserverMessages,
+} from "./primitives/index.ts";
