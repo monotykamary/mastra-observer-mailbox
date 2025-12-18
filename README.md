@@ -22,10 +22,10 @@ Key features:
 │                         OBSERVER SYSTEM                                    │
 │                                                                            │
 │   ┌────────────────────────────────────────────────────────────────────┐   │
-│   │                    ObserverMiddleware                              │   │
+│   │                   ObserverContext (primitives)                     │   │
 │   │  ┌───────────────┐              ┌──────────────────────┐           │   │
-│   │  │transformParams│────────────▶ │ Inject insight into  │           │   │
-│   │  │ (step start)  │   read()     │ prompt               │           │   │
+│   │  │getPending     │────────────▶ │ Inject context into  │           │   │
+│   │  │ Context()     │   read()     │ prompt               │           │   │
 │   │  └───────────────┘              └──────────────────────┘           │   │
 │   │         │                                                          │   │
 │   │         │                        ┌──────────────────────┐          │   │
@@ -40,8 +40,8 @@ Key features:
 │   │         │                          write()  │                      │   │
 │   │         │                                   │                      │   │
 │   │  ┌──────▼──────┐               ┌────────────┴────────────┐         │   │
-│   │  │ wrapGenerate│──────────────▶│   ObserverAgent         │         │   │
-│   │  │ (step end)  │   trigger     │   (background async)    │         │   │
+│   │  │dispatchTo   │──────────────▶│   ObserverAgent         │         │   │
+│   │  │ Observers() │   trigger     │   (background async)    │         │   │
 │   │  └─────────────┘   with        │                         │         │   │
 │   │                    StepSnapshot│   - Analyzes last step  │         │   │
 │   │                                │   - Writes insights     │         │   │
@@ -95,7 +95,8 @@ STEP 1          STEP 2          STEP 3          STEP 4          STEP 5
 ```typescript
 import {
   InMemoryMailboxStore,
-  createObserverMiddleware,
+  createObserverContext,
+  TriggerFilters,
 } from "mastra-observer-mailbox";
 
 // 1. Create the store
@@ -104,36 +105,42 @@ const store = new InMemoryMailboxStore({
   defaultTtlSteps: 8,
 });
 
-// 2. Create middleware
-const middleware = createObserverMiddleware({
+// 2. Create a context bound to a thread
+const ctx = createObserverContext({
   store,
+  threadId: "thread-123",
   injection: {
     target: "end-of-history", // Cache-friendly position
     maxMessagesPerTurn: 3,
     minConfidence: 0.6,
   },
-  trigger: {
-    mode: "every-step",
-    async: true, // Don't block main agent
-  },
-  onTrigger: async (snapshot) => {
-    // Run your observer agent here
-    // const insight = await observerAgent.analyze(snapshot);
-    // store.send({ ...insight });
-  },
 });
 
 // 3. Use in your agent loop
-function agentStep(threadId: string, stepNumber: number, prompt: Message[]) {
-  // Transform params before LLM call (injects pending messages)
-  const enrichedPrompt = middleware.transformParams(threadId, stepNumber, prompt);
+async function agentStep(prompt: Message[]) {
+  ctx.nextStep();
+
+  // Get pending messages and inject into prompt
+  const { formattedContext, messageIds } = ctx.getPendingContext();
+  const enrichedPrompt = ctx.injectContext(prompt, formattedContext);
 
   // Call your LLM
   const response = await llm.generate(enrichedPrompt);
 
-  // Process result (marks messages, triggers observer)
-  await middleware.afterGenerate(threadId, response);
+  // Mark messages as incorporated
+  ctx.markIncorporated(messageIds);
 
+  // Create snapshot and dispatch to observer
+  const snapshot = ctx.createSnapshot(prompt, response);
+
+  if (TriggerFilters.onToolCall()({ snapshot, response })) {
+    await ctx.dispatchToObservers(snapshot, async (snap) => {
+      const insight = await observerAgent.analyze(snap);
+      store.send({ ...insight });
+    });
+  }
+
+  ctx.gc();
   return response;
 }
 ```
@@ -384,33 +391,168 @@ const snapshots = store.getSnapshots("thread-1", 5);
 store.gc("thread-1", currentStep);
 ```
 
-### ObserverMiddleware
+### Primitives API
+
+The primitives API provides composable functions for building observer systems. Import from `mastra-observer-mailbox/primitives` or directly from the main package.
+
+#### createObserverContext
+
+Factory function that creates a context bound to a thread with all observer operations.
 
 ```typescript
-const middleware = createObserverMiddleware({
+import { createObserverContext } from "mastra-observer-mailbox/primitives";
+
+const ctx = createObserverContext({
   store,
+  threadId: "thread-123",
+  autoIncrementStep: false, // Set true to auto-increment on getPendingContext
+  initialStep: 0,
   injection: {
     target: "end-of-history",
     maxMessagesPerTurn: 3,
     minConfidence: 0.6,
   },
-  trigger: {
-    mode: "every-step",
-    async: true,
-  },
-  onTrigger: async (snapshot) => {
-    // Analyze the snapshot and send insights
-  },
 });
 
-// Before LLM call
-const enrichedPrompt = middleware.transformParams(threadId, step, prompt);
+// Context properties
+ctx.threadId;     // The bound thread ID
+ctx.currentStep;  // Current step number
+ctx.store;        // Access to the mailbox store
+
+// Step management
+ctx.nextStep();                    // Increment step
+ctx.setStep(5);                    // Set specific step
+
+// Context injection
+const { formattedContext, messageIds } = ctx.getPendingContext();
+const enriched = ctx.injectContext(messages, formattedContext);
 
 // After LLM call
-await middleware.afterGenerate(threadId, response, workingMemory);
+ctx.markIncorporated(messageIds);
 
-// Access store
-const store = middleware.getStore();
+// Create and dispatch snapshots
+const snapshot = ctx.createSnapshot(originalPrompt, response, workingMemory);
+await ctx.dispatchToObservers(snapshot, async (snap) => {
+  const insight = await analyzeWithObserver(snap);
+  store.send(insight);
+});
+
+// Cleanup
+ctx.gc();
+```
+
+#### InjectionFilters
+
+Composable predicates for controlling when to inject observer context.
+
+```typescript
+import { InjectionFilters } from "mastra-observer-mailbox/primitives";
+
+// Built-in filters
+InjectionFilters.always();           // Always inject
+InjectionFilters.never();            // Never inject
+InjectionFilters.hasPending();       // Only if pending messages exist
+InjectionFilters.minMessages(n);     // Only if >= n pending messages
+InjectionFilters.minConfidence(0.7); // Only if any message has >= confidence
+
+// Combinators
+InjectionFilters.and(filter1, filter2);  // Both must pass
+InjectionFilters.or(filter1, filter2);   // Either passes
+InjectionFilters.not(filter);            // Inverts filter
+
+// Example usage
+const shouldInject = InjectionFilters.and(
+  InjectionFilters.hasPending(),
+  InjectionFilters.minConfidence(0.6)
+);
+
+if (shouldInject({ messages: pendingMessages })) {
+  // Inject context
+}
+```
+
+#### TriggerFilters
+
+Composable predicates for controlling when to dispatch to observers.
+
+```typescript
+import { TriggerFilters } from "mastra-observer-mailbox/primitives";
+
+// Built-in filters
+TriggerFilters.always();                      // Always trigger
+TriggerFilters.never();                       // Never trigger
+TriggerFilters.onToolCall();                  // When response has tool calls
+TriggerFilters.onToolResult();                // When response has tool results
+TriggerFilters.onError();                     // When response text contains errors
+TriggerFilters.containsKeywords(["error"]);   // When text contains keywords
+TriggerFilters.everyNSteps(3);                // Every N steps
+
+// Combinators
+TriggerFilters.anyOf(filter1, filter2);  // Any filter passes
+TriggerFilters.allOf(filter1, filter2);  // All filters pass
+TriggerFilters.not(filter);              // Inverts filter
+
+// Example: trigger on tool calls OR errors
+const shouldTrigger = TriggerFilters.anyOf(
+  TriggerFilters.onToolCall(),
+  TriggerFilters.onError()
+);
+
+if (shouldTrigger({ snapshot, response })) {
+  await ctx.dispatchToObservers(snapshot, handler);
+}
+```
+
+#### Injection Utilities
+
+Low-level utilities for formatting and injecting messages.
+
+```typescript
+import {
+  formatMessagesForInjection,
+  injectIntoPrompt,
+  injectObserverMessages,
+} from "mastra-observer-mailbox/primitives";
+
+// Format messages for injection
+const formatted = formatMessagesForInjection(messages, { sanitize: true });
+// => "<observer-context>\n[INSIGHT confidence=85%]\n..."
+
+// Inject into specific position
+const enriched = injectIntoPrompt(prompt, formatted, "end-of-history");
+
+// All-in-one injection
+const { enrichedPrompt, messageIds } = injectObserverMessages(store, {
+  threadId: "thread-1",
+  prompt: messages,
+  target: "end-of-history",
+  minConfidence: 0.6,
+  maxMessages: 3,
+});
+```
+
+### ObserverMiddleware (Deprecated)
+
+> **Deprecated:** Use `createObserverContext` from `mastra-observer-mailbox/primitives` instead.
+
+```typescript
+// Migration guide:
+// Old:
+const middleware = createObserverMiddleware({ store, ... });
+const enriched = middleware.transformParams(threadId, step, prompt);
+await middleware.afterGenerate(threadId, response);
+
+// New:
+import { createObserverContext } from "mastra-observer-mailbox/primitives";
+const ctx = createObserverContext({ store, threadId });
+ctx.nextStep();
+const { formattedContext, messageIds } = ctx.getPendingContext();
+const enriched = ctx.injectContext(prompt, formattedContext);
+// ... LLM call ...
+ctx.markIncorporated(messageIds);
+const snapshot = ctx.createSnapshot(prompt, response);
+await ctx.dispatchToObservers(snapshot, handler);
+ctx.gc();
 ```
 
 ## Testing
