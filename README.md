@@ -460,6 +460,13 @@ InjectionFilters.and(filter1, filter2);  // Both must pass
 InjectionFilters.or(filter1, filter2);   // Either passes
 InjectionFilters.not(filter);            // Inverts filter
 
+// Custom filter - full control over injection logic
+InjectionFilters.custom((input) => {
+  // input: { messages, step }
+  // Return true to inject, false to skip
+  return input.messages.some(m => m.type === "warning");
+});
+
 // Example usage
 const shouldInject = InjectionFilters.and(
   InjectionFilters.hasPending(),
@@ -469,6 +476,13 @@ const shouldInject = InjectionFilters.and(
 if (shouldInject({ messages: pendingMessages })) {
   // Inject context
 }
+
+// Custom filter example: only inject on even steps with warnings
+const customFilter = InjectionFilters.custom(({ messages, step }) => {
+  const hasWarning = messages.some(m => m.type === "warning");
+  const isEvenStep = step % 2 === 0;
+  return hasWarning && isEvenStep;
+});
 ```
 
 #### TriggerFilters
@@ -492,6 +506,14 @@ TriggerFilters.anyOf(filter1, filter2);  // Any filter passes
 TriggerFilters.allOf(filter1, filter2);  // All filters pass
 TriggerFilters.not(filter);              // Inverts filter
 
+// Custom filter - full control over trigger logic
+TriggerFilters.custom((input) => {
+  // input: { snapshot, response }
+  // Return true to trigger, false to skip
+  const { response } = input;
+  return response.text?.includes("CRITICAL") ?? false;
+});
+
 // Example: trigger on tool calls OR errors
 const shouldTrigger = TriggerFilters.anyOf(
   TriggerFilters.onToolCall(),
@@ -501,6 +523,22 @@ const shouldTrigger = TriggerFilters.anyOf(
 if (shouldTrigger({ snapshot, response })) {
   await ctx.dispatchToObservers(snapshot, handler);
 }
+
+// Custom filter example: trigger only for specific tool calls
+const browserToolFilter = TriggerFilters.custom(({ response }) => {
+  const toolCalls = response.toolCalls ?? [];
+  const browserTools = ["navigate", "click", "screenshot", "extract"];
+  return toolCalls.some(tc => browserTools.includes(tc.name));
+});
+
+// Custom filter example: trigger on high-cost operations
+const highCostFilter = TriggerFilters.custom(({ snapshot, response }) => {
+  const toolCalls = response.toolCalls ?? [];
+  const expensiveTools = ["web_search", "code_execution", "file_write"];
+  const hasExpensiveTool = toolCalls.some(tc => expensiveTools.includes(tc.name));
+  const longResponse = (response.text?.length ?? 0) > 2000;
+  return hasExpensiveTool || longResponse;
+});
 ```
 
 #### Injection Utilities
