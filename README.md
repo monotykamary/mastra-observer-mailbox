@@ -145,6 +145,97 @@ async function agentStep(prompt: Message[]) {
 }
 ```
 
+## Static Context Injection (No Agent Required)
+
+For deterministic, rule-based context injection without an AI observer agent:
+
+```typescript
+import {
+  InMemoryMailboxStore,
+  createObserverContext,
+  TriggerFilters,
+} from "mastra-observer-mailbox";
+import type { StepSnapshot, SendMessageInput } from "mastra-observer-mailbox";
+
+const store = new InMemoryMailboxStore();
+const ctx = createObserverContext({ store, threadId: "thread-123" });
+
+// Define deterministic rules - no AI agent needed
+function applyContextRules(snapshot: StepSnapshot): void {
+  const { response, threadId, stepNumber } = snapshot;
+
+  // Rule 1: Warn on payment page navigation
+  const navToCheckout = response.toolCalls?.some(
+    (tc) => tc.name === "navigate" && String(tc.args?.url).includes("/checkout")
+  );
+  if (navToCheckout) {
+    store.send({
+      threadId,
+      from: "security-rules",
+      sentAtStep: stepNumber,
+      sentAtTime: Date.now(),
+      type: "warning",
+      content: "Payment page detected. Verify SSL and check for phishing indicators.",
+      confidence: 1.0,
+      expiresAtStep: stepNumber + 2,
+    });
+  }
+
+  // Rule 2: Add context when searching
+  const isSearching = response.toolCalls?.some((tc) => tc.name === "search");
+  if (isSearching) {
+    store.send({
+      threadId,
+      from: "search-rules",
+      sentAtStep: stepNumber,
+      sentAtTime: Date.now(),
+      type: "context",
+      content: "Prefer official documentation. Filter by last 12 months for freshness.",
+      confidence: 0.9,
+      expiresAtStep: stepNumber + 3,
+    });
+  }
+
+  // Rule 3: Inject domain knowledge on specific keywords
+  if (response.text?.toLowerCase().includes("rate limit")) {
+    store.send({
+      threadId,
+      from: "domain-rules",
+      sentAtStep: stepNumber,
+      sentAtTime: Date.now(),
+      type: "insight",
+      content: "Rate limits: Implement exponential backoff. Start at 1s, max 32s, with jitter.",
+      confidence: 1.0,
+      expiresAtStep: stepNumber + 5,
+    });
+  }
+}
+
+// Agent loop - synchronous rule application
+async function agentStep(prompt: Message[]) {
+  ctx.nextStep();
+
+  const { formattedContext, messageIds } = ctx.getPendingContext();
+  const enrichedPrompt = ctx.injectContext(prompt, formattedContext);
+
+  const response = await llm.generate(enrichedPrompt);
+  ctx.markIncorporated(messageIds);
+
+  // Apply rules synchronously - no async observer needed
+  const snapshot = ctx.createSnapshot(prompt, response);
+  applyContextRules(snapshot);
+
+  ctx.gc();
+  return response;
+}
+```
+
+This pattern is useful for:
+- **Security guardrails**: Inject warnings based on URL patterns or tool usage
+- **Domain knowledge**: Add static context when specific topics are detected
+- **Compliance rules**: Inject reminders based on regulatory keywords
+- **Performance hints**: Add caching or optimization suggestions based on API calls
+
 ## Core Concepts
 
 ### Mailbox vs Inbox
