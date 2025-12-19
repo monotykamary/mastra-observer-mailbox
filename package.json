@@ -1,6 +1,6 @@
 {
   "name": "mastra-observer-mailbox",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A hybrid message-oriented store for passive, event-driven communication between AI agents for Mastra",
   "module": "src/index.ts",
   "main": "dist/index.js",
