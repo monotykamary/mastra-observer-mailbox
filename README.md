@@ -90,6 +90,22 @@ STEP 1          STEP 2          STEP 3          STEP 4          STEP 5
                                from step 1)
 ```
 
+## Installation
+
+```bash
+# npm
+npm install mastra-observer-mailbox
+
+# yarn
+yarn add mastra-observer-mailbox
+
+# pnpm
+pnpm add mastra-observer-mailbox
+
+# bun
+bun add mastra-observer-mailbox
+```
+
 ## Quick Start
 
 ```typescript
